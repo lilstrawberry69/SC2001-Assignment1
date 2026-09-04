@@ -1,6 +1,6 @@
-def merge_sort(arr, S):
+def merge_sort(arr, S): #S is the value we are testing to finding out how far down we should split
     if len(arr) <= S:
-        insert_sort(arr)
+        insert_sort(arr) #adjusted this base case to perform insertion sort
         return arr
     mid = len(arr) // 2
     left = merge_sort(arr[:mid])
