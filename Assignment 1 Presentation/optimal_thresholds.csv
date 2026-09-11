@@ -1,0 +1,4 @@
+experiment,algorithm,n,S,comparisons,cpu_seconds,wall_seconds,trial_count,near_optimal_S
+optimal,hybrid,100000,12,1619322.0,0.359375,0.3604553999612108,3,"12, 16"
+optimal,hybrid,1000000,12,19072326.0,4.59375,4.723441999987699,3,12
+optimal,hybrid,10000000,12,226413194.0,60.875,63.37898650002899,3,"8, 12, 16, 24, 32"
