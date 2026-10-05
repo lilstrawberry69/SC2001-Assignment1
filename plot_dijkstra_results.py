@@ -9,7 +9,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import matplotlib
-from matplotlib.ticker import FuncFormatter, LogLocator
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
 
 matplotlib.use("Agg")
 
@@ -55,7 +55,31 @@ COUNT_FIELDS = (
     "stale_heap_pops",
     "successful_relaxations",
 )
-FAMILIES = ("sparse", "medium", "dense")
+# One entry per vertex-scaling panel: (key, experiment, graph_family).
+# PANELS is filled from the data in main(): the fixed-degree sweep first
+# (key "sparse"), then every fixed-density family ordered by its density.
+PANELS = []
+PANEL_PALETTE = (BLUE, RED, ORANGE, "#5C8D89", "#548235", GRAY)
+
+
+def discover_panels(rows):
+    panels = []
+    if any(row["experiment"] == "vertex_scaling_fixed_degree"
+           for row in rows):
+        panels.append(("sparse", "vertex_scaling_fixed_degree", None))
+    densities = defaultdict(list)
+    for row in rows:
+        if row["experiment"] == "vertex_scaling":
+            densities[row["graph_family"]].append(row["density"])
+    for family in sorted(
+        densities, key=lambda name: statistics.median(densities[name])
+    ):
+        panels.append((family, "vertex_scaling", family))
+    return panels
+
+
+def panel_color(panel):
+    return PANEL_PALETTE[PANELS.index(panel) % len(PANEL_PALETTE)]
 
 
 def style_axis(axis):
@@ -83,9 +107,10 @@ def runtime_unit(seconds_values):
     return 1, "s"
 
 
-def format_runtime_axis(axis, unit, logarithmic=False):
-    axis.set_ylabel(f"Median CPU time ({unit})", color=TEXT_COLOR,
-                    labelpad=10, fontname=FONT)
+def format_runtime_axis(axis, unit, logarithmic=False, show_label=True):
+    if show_label:
+        axis.set_ylabel(f"Median CPU time ({unit})", color=TEXT_COLOR,
+                        labelpad=10, fontname=FONT)
     if logarithmic:
         axis.set_yscale("log")
         axis.yaxis.set_major_locator(LogLocator(base=10, subs=(1, 2, 5)))
@@ -94,11 +119,15 @@ def format_runtime_axis(axis, unit, logarithmic=False):
     )
 
 
+HEADER_INCHES = 0.77
+
+
 def add_header(fig, title, subtitle):
-    fig.text(0.06, 0.965, title, ha="left", va="top",
+    height = fig.get_figheight()
+    fig.text(0.06, 1 - 0.17 / height, title, ha="left", va="top",
              fontsize=19, fontweight="bold", color=TEXT_COLOR,
              fontname=FONT)
-    fig.text(0.06, 0.903, subtitle, ha="left", va="top",
+    fig.text(0.06, 1 - 0.47 / height, subtitle, ha="left", va="top",
              fontsize=9.5, color=GRAY, fontname=FONT)
 
 
@@ -192,52 +221,93 @@ def _scaled_reference(points, feature):
 
 
 def _finish_figure(fig, output_dir, filename):
-    fig.tight_layout(rect=(0.03, 0.04, 0.98, 0.84))
+    fig.tight_layout(
+        rect=(0.03, 0.04, 0.98, 1 - HEADER_INCHES / fig.get_figheight()))
     fig.patch.set_facecolor(CHART_BG)
     fig.savefig(output_dir / filename, dpi=240, bbox_inches="tight",
                 facecolor=fig.get_facecolor())
     plt.close(fig)
 
 
+def panel_rows(rows, panel, implementation=None):
+    """Summary rows for one vertex-scaling panel, ordered by vertex count."""
+    _, experiment, family = panel
+    return sorted(
+        [row for row in rows
+         if row["experiment"] == experiment
+         and (family is None or row["graph_family"] == family)
+         and (implementation is None
+              or row["implementation"] == implementation)],
+        key=lambda row: (row["number_of_vertices"], row["implementation"]),
+    )
+
+
+def panel_title(panel, points):
+    key, experiment, _ = panel
+    first = points[0]
+    if experiment == "vertex_scaling_fixed_degree":
+        degree = first["number_of_edges"] / first["number_of_vertices"]
+        return f"Sparse (E = {degree:g}V)"
+    name = key.replace("_", " ").title()
+    return f"{name} (density {first['density']:.2f})"
+
+
+def edges_for_vertices(panel, points):
+    """Edge count as a function of |V| for the panel's graph family."""
+    first = points[0]
+    if panel[1] == "vertex_scaling_fixed_degree":
+        degree = first["number_of_edges"] / first["number_of_vertices"]
+        return lambda vertex_count: degree * vertex_count
+    density = first["density"]
+    return lambda vertex_count: density * vertex_count * (vertex_count - 1)
+
+
+PANEL_COLUMNS = 3
+
+
+def panel_grid(panel_count, **subplot_kwargs):
+    """Create a grid with PANEL_COLUMNS columns and hide unused cells."""
+    grid_rows = math.ceil(panel_count / PANEL_COLUMNS)
+    fig, axes = plt.subplots(
+        grid_rows, PANEL_COLUMNS, squeeze=False,
+        figsize=(14, 4.4 * grid_rows + 0.6), **subplot_kwargs,
+    )
+    flat_axes = list(axes.flat)
+    for unused_axis in flat_axes[panel_count:]:
+        unused_axis.set_visible(False)
+    return fig, flat_axes[:panel_count]
+
+
 def plot_vertex_scaling(rows, output_dir, implementation):
-    points_by_family = {
-        family: sorted(
-            [row for row in rows
-             if row["experiment"] == "vertex_scaling"
-             and row["graph_family"] == family
-             and row["implementation"] == implementation],
-            key=lambda row: row["number_of_vertices"],
-        )
-        for family in FAMILIES
-    }
-    if not any(points_by_family.values()):
+    panels = [panel for panel in PANELS
+              if panel_rows(rows, panel, implementation)]
+    if not panels:
         return
 
-    all_points = [row for points in points_by_family.values()
-                  for row in points]
+    all_points = [row for panel in panels
+                  for row in panel_rows(rows, panel, implementation)]
     factor, unit = runtime_unit(
         [row["median_cpu_seconds"] for row in all_points]
     )
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.8))
-    for axis, family in zip(axes, FAMILIES):
+    fig, axes = panel_grid(len(panels))
+    for index, (axis, panel) in enumerate(zip(axes, panels)):
         style_axis(axis)
-        points = points_by_family[family]
+        points = panel_rows(rows, panel, implementation)
         vertices = [row["number_of_vertices"] for row in points]
         times = [row["median_cpu_seconds"] * factor for row in points]
         style_line(
             axis, vertices, times, COLORS[implementation],
             "Empirical median CPU time",
         )
+        reference_vertices = [
+            vertices[0] + (vertices[-1] - vertices[0]) * step / 199
+            for step in range(200)
+        ]
         if implementation == "matrix_array":
             def feature(row):
                 return row["number_of_vertices"] ** 2
             reference_label = "Scaled O(V^2) reference"
             scale = _reference_scale(points, feature)
-            density = points[0]["density"]
-            reference_vertices = [
-                vertices[0] + (vertices[-1] - vertices[0]) * step / 199
-                for step in range(200)
-            ]
             reference_values = [
                 scale * vertex_count ** 2 * factor
                 for vertex_count in reference_vertices
@@ -249,15 +319,10 @@ def plot_vertex_scaling(rows, output_dir, implementation):
                 ) * math.log2(row["number_of_vertices"])
             reference_label = "Scaled O((V+E) log V) reference"
             scale = _reference_scale(points, feature)
-            density = points[0]["density"]
-            reference_vertices = [
-                vertices[0] + (vertices[-1] - vertices[0]) * step / 199
-                for step in range(200)
-            ]
+            edges_at = edges_for_vertices(panel, points)
             reference_values = [
                 scale
-                * (vertex_count
-                   + density * vertex_count * (vertex_count - 1))
+                * (vertex_count + edges_at(vertex_count))
                 * math.log2(vertex_count)
                 * factor
                 for vertex_count in reference_vertices
@@ -267,13 +332,12 @@ def plot_vertex_scaling(rows, output_dir, implementation):
             linestyle="--", linewidth=1.8,
             color="#555555", label=reference_label,
         )
-        axis.set_title(
-            f"{family.title()} (density {points[0]['density']:.2f})",
-            color=TEXT_COLOR, fontname=FONT)
+        axis.set_title(panel_title(panel, points),
+                       color=TEXT_COLOR, fontname=FONT)
         axis.set_xlabel("Vertices |V|", color=TEXT_COLOR, labelpad=10,
                         fontname=FONT)
         axis.set_ylim(bottom=0)
-    format_runtime_axis(axes[0], unit)
+        format_runtime_axis(axis, unit, show_label=index % PANEL_COLUMNS == 0)
     axes[0].legend(frameon=False, fontsize=8)
     part = "a" if implementation == "matrix_array" else "b"
     add_header(
@@ -286,23 +350,18 @@ def plot_vertex_scaling(rows, output_dir, implementation):
 
 
 def plot_vertex_comparison(rows, output_dir):
-    points_all = [row for row in rows if row["experiment"] == "vertex_scaling"]
-    if not points_all:
+    panels = [panel for panel in PANELS if panel_rows(rows, panel)]
+    if not panels:
         return
+    all_points = [row for panel in panels for row in panel_rows(rows, panel)]
     factor, unit = runtime_unit(
-        [row["median_cpu_seconds"] for row in points_all]
+        [row["median_cpu_seconds"] for row in all_points]
     )
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4.8), sharey=True)
-    for axis, family in zip(axes, FAMILIES):
+    fig, axes = panel_grid(len(panels), sharey=True)
+    for index, (axis, panel) in enumerate(zip(axes, panels)):
         style_axis(axis)
         for implementation, label in IMPLEMENTATIONS.items():
-            points = sorted(
-                [row for row in rows
-                 if row["experiment"] == "vertex_scaling"
-                 and row["graph_family"] == family
-                 and row["implementation"] == implementation],
-                key=lambda row: row["number_of_vertices"],
-            )
+            points = panel_rows(rows, panel, implementation)
             if points:
                 style_line(
                     axis,
@@ -310,11 +369,12 @@ def plot_vertex_comparison(rows, output_dir):
                     [row["median_cpu_seconds"] * factor for row in points],
                     COLORS[implementation], label,
                 )
-        axis.set_title(f"{family.title()} graphs", color=TEXT_COLOR,
-                       fontname=FONT)
+        axis.set_title(panel_title(panel, panel_rows(rows, panel)),
+                       color=TEXT_COLOR, fontname=FONT)
         axis.set_xlabel("Vertices |V|", color=TEXT_COLOR, labelpad=10,
                         fontname=FONT)
-    format_runtime_axis(axes[0], unit, logarithmic=True)
+        format_runtime_axis(axis, unit, logarithmic=True,
+                            show_label=index % PANEL_COLUMNS == 0)
     axes[0].legend(frameon=False, fontsize=8)
     add_header(fig, "PART (C): IMPLEMENTATION RUNTIME COMPARISON",
                "Both implementations use the same graph at each vertex count")
@@ -454,18 +514,62 @@ def plot_speedup(rows, output_dir):
     _finish_figure(fig, output_dir, "c_03_speedup_vs_density.png")
 
 
+def plot_speedup_vs_vertices(rows, output_dir):
+    """Matrix time / heap time against |V|, one line per graph family."""
+    fig, axis = plt.subplots(figsize=(8.5, 5.2))
+    style_axis(axis)
+    all_vertices = set()
+    for panel in PANELS:
+        matrix = {row["number_of_vertices"]: row
+                  for row in panel_rows(rows, panel, "matrix_array")}
+        heap = {row["number_of_vertices"]: row
+                for row in panel_rows(rows, panel, "adjacency_list_heap")}
+        vertices = sorted(
+            vertex_count for vertex_count in set(matrix) & set(heap)
+            if heap[vertex_count]["median_cpu_seconds"] > 0
+        )
+        if not vertices:
+            continue
+        all_vertices.update(vertices)
+        style_line(
+            axis,
+            vertices,
+            [matrix[v]["median_cpu_seconds"] / heap[v]["median_cpu_seconds"]
+             for v in vertices],
+            panel_color(panel),
+            panel_title(panel, panel_rows(rows, panel)),
+        )
+    if not all_vertices:
+        plt.close(fig)
+        return
+    axis.axhline(1.0, color=GRAY, linestyle="--", linewidth=1.3)
+    axis.set_xscale("log", base=2)
+    axis.set_xticks(sorted(all_vertices))
+    axis.xaxis.set_major_formatter(
+        FuncFormatter(lambda value, _: f"{value:,.0f}"))
+    axis.xaxis.set_minor_formatter(NullFormatter())
+    axis.set_yscale("log")
+    axis.yaxis.set_major_locator(LogLocator(base=10, subs=(1, 2, 5)))
+    axis.yaxis.set_major_formatter(
+        FuncFormatter(lambda value, _: f"{value:g}"))
+    axis.yaxis.set_minor_formatter(NullFormatter())
+    axis.set_xlabel("Vertices |V|", color=TEXT_COLOR, labelpad=10,
+                    fontname=FONT)
+    axis.set_ylabel("Speedup: matrix time / heap time", color=TEXT_COLOR,
+                    labelpad=10, fontname=FONT)
+    axis.legend(frameon=False, fontsize=8, loc="upper left",
+                  bbox_to_anchor=(1.02, 1.0))
+    add_header(fig, "PART (C): SPEEDUP BY VERTEX COUNT",
+               "Matrix time / heap time; above 1 favors the heap, below 1 favors the matrix")
+    _finish_figure(fig, output_dir, "c_04_speedup_vs_vertices.png")
+
+
 def plot_operation_counts(rows, output_dir):
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.8))
     for axis in axes:
         style_axis(axis)
-    for family in FAMILIES:
-        matrix_points = sorted(
-            [row for row in rows
-             if row["experiment"] == "vertex_scaling"
-             and row["graph_family"] == family
-             and row["implementation"] == "matrix_array"],
-            key=lambda row: row["number_of_vertices"],
-        )
+    for panel in PANELS:
+        matrix_points = panel_rows(rows, panel, "matrix_array")
         if matrix_points:
             style_line(
                 axes[0],
@@ -473,41 +577,46 @@ def plot_operation_counts(rows, output_dir):
                 [float(row["minimum_scan_checks"])
                  + float(row["matrix_neighbour_checks"])
                  for row in matrix_points],
-                {"sparse": BLUE, "medium": RED, "dense": ORANGE}[family],
-                family.title(),
+                panel_color(panel),
+                panel[0].replace("_", " ").title(),
             )
+    axes[0].text(
+        0.97, 0.05, "Lines overlap: matrix work\ndepends only on |V|",
+        transform=axes[0].transAxes, ha="right", va="bottom",
+        fontsize=8, color=GRAY, fontname=FONT,
+    )
 
-        heap_points = sorted(
-            [row for row in rows
-             if row["experiment"] == "edge_scaling"
-             and row["implementation"] == "adjacency_list_heap"],
-            key=lambda row: row["number_of_edges"],
+    heap_points = sorted(
+        [row for row in rows
+         if row["experiment"] == "edge_scaling"
+         and row["implementation"] == "adjacency_list_heap"],
+        key=lambda row: row["number_of_edges"],
+    )
+    if heap_points:
+        style_line(
+            axes[1],
+            [row["number_of_edges"] for row in heap_points],
+            [float(row["edge_scans"]) for row in heap_points],
+            COLORS["adjacency_list_heap"], "Measured edge scans",
         )
-        if family == "sparse" and heap_points:
-            style_line(
-                axes[1],
-                [row["number_of_edges"] for row in heap_points],
-                [float(row["edge_scans"]) for row in heap_points],
-                COLORS["adjacency_list_heap"], "Measured edge scans",
-            )
-            axes[1].plot(
-                [row["number_of_edges"] for row in heap_points],
-                [row["number_of_edges"] for row in heap_points],
-                linestyle="--", linewidth=1.8, color=GRAY,
-                label="E reference",
-            )
-            style_line(
-                axes[2],
-                [row["number_of_edges"] for row in heap_points],
-                [float(row["heap_pushes"]) for row in heap_points],
-                BLUE, "Heap pushes",
-            )
-            axes[2].plot(
-                [row["number_of_edges"] for row in heap_points],
-                [float(row["heap_pops"]) for row in heap_points],
-                marker="s", linestyle="--", linewidth=2.0,
-                color=ORANGE, label="Heap pops",
-            )
+        axes[1].plot(
+            [row["number_of_edges"] for row in heap_points],
+            [row["number_of_edges"] for row in heap_points],
+            linestyle="--", linewidth=1.8, color=GRAY,
+            label="E reference",
+        )
+        style_line(
+            axes[2],
+            [row["number_of_edges"] for row in heap_points],
+            [float(row["heap_pushes"]) for row in heap_points],
+            BLUE, "Heap pushes",
+        )
+        axes[2].plot(
+            [row["number_of_edges"] for row in heap_points],
+            [float(row["heap_pops"]) for row in heap_points],
+            marker="s", linestyle="--", linewidth=2.0,
+            color=ORANGE, label="Heap pops",
+        )
 
     axes[0].set_xlabel("V^2", color=TEXT_COLOR, fontname=FONT)
     axes[0].set_ylabel("Minimum scans + matrix-neighbour checks",
@@ -540,6 +649,7 @@ def main():
     arguments = parser.parse_args()
 
     rows = load_summary(arguments.input)
+    PANELS[:] = discover_panels(rows)
     write_summary(rows, arguments.summary)
     arguments.output_dir.mkdir(parents=True, exist_ok=True)
     plot_vertex_scaling(rows, arguments.output_dir, "matrix_array")
@@ -549,6 +659,7 @@ def main():
     plot_edge_scaling(rows, arguments.output_dir, "adjacency_list_heap")
     plot_edge_comparison(rows, arguments.output_dir)
     plot_speedup(rows, arguments.output_dir)
+    plot_speedup_vs_vertices(rows, arguments.output_dir)
     plot_operation_counts(rows, arguments.output_dir)
     print(f"Saved {len(rows)} median configurations to {arguments.summary}")
     print(f"Saved figures to {arguments.output_dir}")

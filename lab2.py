@@ -38,8 +38,17 @@ QUICK_EDGE_COUNTS = [999, 2000, 5000]
 
 # Fixed-vertex edge-scaling experiment.
 EDGE_EXPERIMENT_VERTEX_COUNT = 1000
-EDGE_COUNTS = [999, 2000, 5000, 10000, 50000, 250000, 999000]
+# The extra points between 250000 and 999000 pin down where the two
+# implementations cross over (V = 1000 allows at most 999000 edges).
+EDGE_COUNTS = [999, 2000, 5000, 10000, 50000, 250000, 400000, 600000, 800000, 999000]
 EDGE_EXPERIMENT_SEED = 20261010
+
+# Fixed-degree vertex-scaling experiment (E = AVERAGE_OUT_DEGREE * V).
+# Unlike the fixed-density families below, E grows only linearly with V,
+# so this is the genuinely sparse regime where the heap version is
+# O(V log V) and the matrix version is still O(V^2).
+AVERAGE_OUT_DEGREE = 5
+DEGREE_EXPERIMENT_SEED = 20261005
 
 # Approximate density:
 #
@@ -48,17 +57,19 @@ EDGE_EXPERIMENT_SEED = 20261010
 #
 # The graph is directed and does not contain self-loops.
 GRAPH_DENSITIES = {
-    "sparse": 0.01,
-    "medium": 0.10,
-    "dense": 0.50,
+    "low": 0.25,
+    "medium": 0.50,
+    "dense": 0.75,
+    "complete": 1.00,
 }
 
 # A different fixed seed is used for each graph-density family.
 # Fixed seeds allow the same graphs to be regenerated.
 GRAPH_SEEDS = {
-    "sparse": 20261001,
+    "low": 20261001,
     "medium": 20261002,
     "dense": 20261003,
+    "complete": 20261004,
 }
 
 # Output file containing every raw timing trial.
@@ -967,6 +978,21 @@ def run_experiment(
                 number_of_edges,
                 random_seed,
             ))
+
+    for number_of_vertices in vertex_counts:
+        number_of_edges = AVERAGE_OUT_DEGREE * number_of_vertices
+        random_seed = DEGREE_EXPERIMENT_SEED + number_of_vertices
+        print(
+            f"Fixed-degree scaling: degree={AVERAGE_OUT_DEGREE}, "
+            f"V={number_of_vertices}, E={number_of_edges}, seed={random_seed}"
+        )
+        all_rows.extend(run_one_graph_experiment(
+            "vertex_scaling_fixed_degree",
+            "sparse",
+            number_of_vertices,
+            number_of_edges,
+            random_seed,
+        ))
 
     for number_of_edges in edge_counts:
         random_seed = EDGE_EXPERIMENT_SEED + number_of_edges
